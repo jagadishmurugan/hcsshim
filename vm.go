@@ -58,6 +58,13 @@ type VirtualMachineOptions struct {
 	AllowOvercommit         bool
 	SecureBootEnabled       bool
 	SecureBootTemplateId    string
+	HvSocketServiceOptions  map[string]HvSocketServiceOption
+}
+
+type HvSocketServiceOption struct {
+	BindSecurityDescriptor    string
+	ConnectSecurityDescriptor string
+	AllowWildcardBinds        bool
 }
 
 const plan9Port = 564
@@ -137,6 +144,29 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 		spec.VirtualMachine.GuestConnection = &hcsschema.GuestConnection{
 			UseVsock:            opts.GuestConnectionUseVsock,
 			UseConnectedSuspend: true,
+		}
+	}
+
+	if len(opts.HvSocketServiceOptions) != 0 {
+		if spec.VirtualMachine.Devices.HvSocket == nil {
+			spec.VirtualMachine.Devices.HvSocket = &hcsschema.HvSocket2{}
+		}
+		hvSocket := spec.VirtualMachine.Devices.HvSocket
+		if hvSocket.HvSocketConfig == nil {
+			hvSocket.HvSocketConfig = &hcsschema.HvSocketSystemConfig{}
+		}
+		hvSocketConfig := hvSocket.HvSocketConfig
+		if hvSocketConfig.ServiceTable == nil {
+			hvSocketConfig.ServiceTable = map[string]hcsschema.HvSocketServiceConfig{}
+		}
+		serviceTable := hvSocketConfig.ServiceTable
+
+		for serviceId, serviceConfig := range opts.HvSocketServiceOptions {
+			serviceTable[serviceId] = hcsschema.HvSocketServiceConfig{
+				BindSecurityDescriptor:    serviceConfig.BindSecurityDescriptor,
+				ConnectSecurityDescriptor: serviceConfig.ConnectSecurityDescriptor,
+				AllowWildcardBinds:        serviceConfig.AllowWildcardBinds,
+			}
 		}
 	}
 
