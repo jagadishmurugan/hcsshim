@@ -1,3 +1,4 @@
+//go:build functional
 // +build functional
 
 package cri_containerd
@@ -15,7 +16,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
 func runLogRotationContainer(t *testing.T, sandboxRequest *runtime.RunPodSandboxRequest, request *runtime.CreateContainerRequest, log string, logArchive string) {
