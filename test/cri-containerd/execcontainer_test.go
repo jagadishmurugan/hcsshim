@@ -1,3 +1,4 @@
+//go:build functional && failing_tests
 // +build functional,failing_tests
 
 package cri_containerd
@@ -7,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
+	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 )
 
 //TODO:
