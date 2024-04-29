@@ -1,11 +1,13 @@
 package hcsshim
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/Microsoft/go-winio/pkg/guid"
@@ -17,6 +19,7 @@ import (
 	hcsschema "github.com/Microsoft/hcsshim/internal/schema2"
 	"github.com/Microsoft/hcsshim/internal/wclayer"
 	"github.com/Microsoft/hcsshim/osversion"
+	"golang.org/x/sys/windows"
 )
 
 type GpuAssignmentMode string
@@ -58,6 +61,13 @@ type VirtualMachineOptions struct {
 	AllowOvercommit         bool
 	SecureBootEnabled       bool
 	SecureBootTemplateId    string
+	HvSocketServiceOptions  map[string]HvSocketServiceOption
+}
+
+type HvSocketServiceOption struct {
+	BindSecurityDescriptor    string
+	ConnectSecurityDescriptor string
+	AllowWildcardBinds        bool
 }
 
 const plan9Port = 564
@@ -137,6 +147,29 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 		spec.VirtualMachine.GuestConnection = &hcsschema.GuestConnection{
 			UseVsock:            opts.GuestConnectionUseVsock,
 			UseConnectedSuspend: true,
+		}
+	}
+
+	if len(opts.HvSocketServiceOptions) != 0 {
+		if spec.VirtualMachine.Devices.HvSocket == nil {
+			spec.VirtualMachine.Devices.HvSocket = &hcsschema.HvSocket2{}
+		}
+		hvSocket := spec.VirtualMachine.Devices.HvSocket
+		if hvSocket.HvSocketConfig == nil {
+			hvSocket.HvSocketConfig = &hcsschema.HvSocketSystemConfig{}
+		}
+		hvSocketConfig := hvSocket.HvSocketConfig
+		if hvSocketConfig.ServiceTable == nil {
+			hvSocketConfig.ServiceTable = map[string]hcsschema.HvSocketServiceConfig{}
+		}
+		serviceTable := hvSocketConfig.ServiceTable
+
+		for serviceId, serviceConfig := range opts.HvSocketServiceOptions {
+			serviceTable[serviceId] = hcsschema.HvSocketServiceConfig{
+				BindSecurityDescriptor:    serviceConfig.BindSecurityDescriptor,
+				ConnectSecurityDescriptor: serviceConfig.ConnectSecurityDescriptor,
+				AllowWildcardBinds:        serviceConfig.AllowWildcardBinds,
+			}
 		}
 	}
 
@@ -339,6 +372,85 @@ func (vm *VirtualMachineSpec) ExecuteCommand(command string) error {
 	defer system.Close()
 
 	return nil
+}
+
+// escapeArgs makes a Windows-style escaped command line from a set of arguments
+func escapeArgs(args []string) string {
+	escapedArgs := make([]string, len(args))
+	for i, a := range args {
+		escapedArgs[i] = windows.EscapeArg(a)
+	}
+	return strings.Join(escapedArgs, " ")
+}
+
+// RunCommand executes a command on the Virtual Machine
+func (vm *VirtualMachineSpec) RunCommand(command []string, user string) (exitCode int, output string, errOut string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	exitCode = 1
+
+	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
+	if err != nil {
+		return exitCode, "", "", err
+	}
+	defer system.Close()
+
+	var params *hcsschema.ProcessParameters
+	switch system.OS() {
+	case "linux":
+		params = &hcsschema.ProcessParameters{
+			CommandArgs:      command,
+			WorkingDirectory: "/",
+			User:             user,
+			Environment:      map[string]string{"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+			CreateStdInPipe:  false,
+			CreateStdOutPipe: true,
+			CreateStdErrPipe: true,
+			ConsoleSize:      []int32{0, 0},
+		}
+	case "windows":
+		params = &hcsschema.ProcessParameters{
+			CommandLine:      escapeArgs(command),
+			WorkingDirectory: `C:\`,
+			User:             user,
+			CreateStdInPipe:  false,
+			CreateStdOutPipe: true,
+			CreateStdErrPipe: true,
+			ConsoleSize:      []int32{0, 0},
+		}
+	default:
+		return exitCode, "", "", ErrNotSupported
+	}
+
+	process, err := system.CreateProcess(ctx, params)
+	if err != nil {
+		return
+	}
+
+	defer process.Close()
+
+	err = process.Wait()
+	if err != nil {
+		return exitCode, "Wait returned error!", "", err
+	}
+
+	exitCode, err = process.ExitCode()
+
+	_, reader, errReader := process.Stdio()
+	if reader != nil {
+		outBuf := new(bytes.Buffer)
+		outBuf.ReadFrom(reader)
+		output = strings.TrimSpace(outBuf.String())
+	}
+
+	if errReader != nil {
+		errBuf := new(bytes.Buffer)
+		errBuf.ReadFrom(errReader)
+		errOut = strings.TrimSpace(errBuf.String())
+	}
+
+	return
 }
 
 func (vm *VirtualMachineSpec) HotAttachEndpoints(endpoints []*hcn.HostComputeEndpoint) (err error) {
